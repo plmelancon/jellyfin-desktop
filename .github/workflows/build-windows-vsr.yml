@@ -1,0 +1,81 @@
+name: build-windows-vsr
+
+on:
+  push:
+    branches:
+      - rtx-vsr
+  workflow_dispatch:
+
+env:
+  MPV_ARCHIVE: mpv-dev-x86_64-20261021-git-e471496c56.7z
+  MPV_URL: https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261021
+  MPV_SHA256: efc719eff3dc5954b4a5efc800632808bcec01cc9034940dd14e5eb7fe9ea633
+  ELECTRON_VERSION: "42.3.0"
+  # The ANGLE files tested with this build. The build fails if Electron's differ.
+  LIBEGL_SHA256: 34998ce757fc1ea58669462d87a1cd6ba27d2ea47a539f4ccfa21c4270f43003
+  LIBGLESV2_SHA256: fe00a94de59674c525aefbc7b9498a96e061d75533ea4412cf78e4c00f5685cb
+  D3DCOMPILER_SHA256: a05f99734f7c4822fefc12b367af21fd0976ed6608752fb1e1e80b6ece7ecbbb
+
+jobs:
+  build-win64-vsr:
+    runs-on: windows-2022
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Qt 5.15.2
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: "5.15.2"
+        arch: "win64_msvc2019_64"
+        modules: "qtwebengine"
+    - name: Install dependencies
+      shell: bash
+      run: |
+        set -e
+        mkdir -p build/dependencies
+        curl -fL https://aka.ms/vs/17/release/vc_redist.x64.exe > vc_redist.x64.exe
+        sed -i 's#C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Redist\\MSVC\\v142\\vcredist_x64.exe#'"$(readlink -f vc_redist.x64.exe | sed 's#/\([a-z]\)/#\1:\\#g' | tr '/' '\\' | sed 's/\\/\\\\/g')#g" bundle/win/Bundle.wxs
+        curl -fL https://github.com/ninja-build/ninja/releases/download/v1.10.2/ninja-win.zip > ninja.zip
+        unzip ninja.zip
+        mv ninja.exe build/
+
+        curl -fL "$MPV_URL/$MPV_ARCHIVE" > mpv.7z
+        echo "$MPV_SHA256  mpv.7z" | sha256sum -c -
+        7z x mpv.7z
+        mkdir mpv
+        mv include mpv
+        gendef libmpv-2.dll
+        mv libmpv-2.dll mpv/libmpv-2.dll
+        mv libmpv-2.def mpv.def
+        mv mpv.def libmpv.dll.a mpv/
+        mv mpv build/
+
+        curl -fL "https://github.com/electron/electron/releases/download/v$ELECTRON_VERSION/electron-v$ELECTRON_VERSION-win32-x64.zip" > electron.zip
+        unzip -j electron.zip libEGL.dll libGLESv2.dll d3dcompiler_47.dll -d build/dependencies
+        echo "$LIBEGL_SHA256  build/dependencies/libEGL.dll" | sha256sum -c -
+        echo "$LIBGLESV2_SHA256  build/dependencies/libGLESv2.dll" | sha256sum -c -
+        echo "$D3DCOMPILER_SHA256  build/dependencies/d3dcompiler_47.dll" | sha256sum -c -
+    - name: Build
+      shell: cmd
+      run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+        cd build
+        set PATH=%PATH%;%CD%
+        cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=output -DCMAKE_MAKE_PROGRAM=ninja.exe -DQTROOT=%Qt5_DIR% -DMPV_INCLUDE_DIR=mpv/include -DMPV_LIBRARY=mpv/libmpv-2.dll -DENABLE_ANGLE_DEP=ON .. || exit /b 1
+        lib /def:mpv\mpv.def /out:mpv\libmpv-2.dll.lib /MACHINE:X64 || exit /b 1
+        ninja || exit /b 1
+        ninja install || exit /b 1
+    - name: Check the bundle
+      shell: bash
+      run: |
+        set -e
+        cd build/output
+        ls -la JellyfinMediaPlayer.exe libmpv-2.dll mpv-scripts/rtx-vsr.lua
+        echo "$LIBEGL_SHA256  libEGL.dll" | sha256sum -c -
+        echo "$LIBGLESV2_SHA256  libGLESv2.dll" | sha256sum -c -
+        echo "$D3DCOMPILER_SHA256  d3dcompiler_47.dll" | sha256sum -c -
+        grep -qa scaling-mode libmpv-2.dll
+    - name: Archive the portable build
+      uses: actions/upload-artifact@v4
+      with:
+        name: jellyfin-media-player-rtx-vsr-windows-x64-portable
+        path: ${{ github.workspace }}/build/output/
