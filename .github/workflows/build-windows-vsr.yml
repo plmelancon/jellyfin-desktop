@@ -60,16 +60,22 @@ jobs:
         call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
         cd build
         set PATH=%PATH%;%CD%
-        cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=output -DCMAKE_MAKE_PROGRAM=ninja.exe -DQTROOT=%Qt5_DIR% -DMPV_INCLUDE_DIR=mpv/include -DMPV_LIBRARY=mpv/libmpv-2.dll -DENABLE_ANGLE_DEP=ON .. || exit /b 1
+        cmake -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=output -DCMAKE_MAKE_PROGRAM=ninja.exe -DQTROOT=%QT_ROOT_DIR% -DMPV_INCLUDE_DIR=mpv/include -DMPV_LIBRARY=mpv/libmpv-2.dll -DENABLE_ANGLE_DEP=ON .. || exit /b 1
         lib /def:mpv\mpv.def /out:mpv\libmpv-2.dll.lib /MACHINE:X64 || exit /b 1
         ninja || exit /b 1
         ninja install || exit /b 1
+    - name: Add the web client extension files
+      shell: bash
+      run: |
+        mkdir -p build/output/web-client/extension
+        cp -r native/. build/output/web-client/extension/
     - name: Check the bundle
       shell: bash
       run: |
         set -e
         cd build/output
-        ls -la JellyfinMediaPlayer.exe libmpv-2.dll mpv-scripts/rtx-vsr.lua
+        ls -la JellyfinMediaPlayer.exe libmpv-2.dll mpv-scripts/rtx-vsr.lua Qt5Core.dll Qt5WebEngineCore.dll QtWebEngineProcess.exe platforms/qwindows.dll qt.conf web-client/extension/find-webclient.html
+        test "$(find . -type f | wc -l)" -gt 100
         echo "$LIBEGL_SHA256  libEGL.dll" | sha256sum -c -
         echo "$LIBGLESV2_SHA256  libGLESv2.dll" | sha256sum -c -
         echo "$D3DCOMPILER_SHA256  d3dcompiler_47.dll" | sha256sum -c -
