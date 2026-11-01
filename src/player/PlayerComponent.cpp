@@ -19,6 +19,7 @@
 #include <math.h>
 #include <string.h>
 #include <shared/Paths.h>
+#include <QFile>
 
 #if !defined(Q_OS_WIN)
 #include <unistd.h>
@@ -87,6 +88,14 @@ bool PlayerComponent::componentInitialize()
   // hardcoded properties below.
   mpv::qt::set_property(m_mpv, "config", "yes");
   mpv::qt::set_property(m_mpv, "config-dir", Paths::dataDir());
+
+#if defined(Q_OS_WIN)
+  // Bundled script that turns on NVIDIA RTX Video Super Resolution when the
+  // video is smaller than the screen. It needs hwdec=auto to get D3D11 frames.
+  QString vsrScript = Paths::resourceDir("mpv-scripts/rtx-vsr.lua");
+  if (QFile::exists(vsrScript))
+    mpv::qt::set_property(m_mpv, "scripts", vsrScript);
+#endif
 
   mpv_set_wakeup_callback(m_mpv, wakeup_cb, this);
 

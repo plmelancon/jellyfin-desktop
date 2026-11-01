@@ -177,6 +177,10 @@ target_link_libraries(${MAIN_TARGET}
 
 install(TARGETS ${MAIN_TARGET} DESTINATION ${INSTALL_BIN_DIR})
 
+if(WIN32)
+  install(FILES ${CMAKE_SOURCE_DIR}/bundle/win/mpv-scripts/rtx-vsr.lua DESTINATION mpv-scripts)
+endif()
+
 set(EXE "${MAIN_NAME}.app")
 set(LIBPATH ${CMAKE_FIND_ROOT_PATH})
 set(SOURCE_ROOT ${CMAKE_SOURCE_DIR})

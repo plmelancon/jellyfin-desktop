@@ -1,5 +1,12 @@
 # Jellyfin Media Player
 
+> **Unofficial fork, Qt 5 line, Windows only.** Branch `rtx-vsr` adds NVIDIA RTX Video
+> Super Resolution. It bundles a newer libmpv and a newer ANGLE (from Electron), which
+> mpv needs for its `d3d11-egl` interop. Not supported by the Jellyfin project: please do
+> not report problems with this build upstream. Portable builds are under this repository's
+> Actions tab (`build-windows-vsr`). On an existing install, set Hardware Decoding to
+> Enabled. HDR video and video already at screen size are left alone.
+
 Desktop client using jellyfin-web with embedded MPV player. Supports Windows, Mac OS,
 and Linux. Media plays within the same window using the jellyfin-web interface unlike
 Jellyfin Desktop. Supports audio passthrough.

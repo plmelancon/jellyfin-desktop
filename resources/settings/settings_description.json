@@ -288,8 +288,16 @@
       {
         "value": "hardwareDecoding",
         "display_name": "Hardware Decoding",
-        "help": "Sets the hardware decoding method. The default is \"copy\"\n\n- Enabled: full hardware acceleration. Removes MPV shader pipelines. Can cause issues more often.\n- Copy: uses hardware decoding but copies the video through MPV's shader pipelines.\n- Disabled: completely disable hardware decoding. Use this if video is glitchy.",
-        "default": "copy",
+        "help": "Sets the hardware decoding method. The default is \"copy\", except on Windows, where it is \"enabled\" because RTX Video Super Resolution requires it.\n\n- Enabled: full hardware acceleration. Removes MPV shader pipelines. Can cause issues more often.\n- Copy: uses hardware decoding but copies the video through MPV's shader pipelines.\n- Disabled: completely disable hardware decoding. Use this if video is glitchy.",
+        "default": [
+          {
+            "value": "enabled",
+            "platforms": [ "windows" ]
+          },
+          {
+            "value": "copy"
+          }
+        ],
         "possible_values": [
           [ "enabled", "Enabled", { "platforms_excluded": "osx" } ],
           [ "enabled", "Enabled (Modern)", { "platforms": "osx" } ],
