@@ -273,6 +273,7 @@ private:
   QTimer m_reloadAudioTimer;
   QTimer m_superResolutionTimer;
   QString m_superResolutionFilter;
+  QString m_superResolutionReason;
   QSet<QString> m_audioDevices;
   bool m_streamSwitchImminent;
   bool m_doAc3Transcoding;

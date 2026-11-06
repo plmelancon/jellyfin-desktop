@@ -1477,6 +1477,15 @@ void PlayerComponent::updateVideoConfiguration()
 // the driver does the upscale to the output size; mpv then only scales the
 // last few pixels. Skipped for HDR (VSR is SDR only) and when the video is
 // already as large as the output.
+// mpv returns yes/no choices as a flag node, other choices as strings.
+static bool isUnscaled(const QVariant& v)
+{
+  if (v.typeId() == QMetaType::Bool)
+    return v.toBool();
+  QString s = v.toString();
+  return !s.isEmpty() && s != "no" && s != "false";
+}
+
 void PlayerComponent::updateSuperResolution()
 {
   if (!m_mpv)
@@ -1508,7 +1517,7 @@ void PlayerComponent::updateSuperResolution()
 
     if (w <= 0 || h <= 0)
       why = "no video";
-    else if (m_mpv->getProperty("video-unscaled").toString() != "no")
+    else if (isUnscaled(m_mpv->getProperty("video-unscaled")))
       why = "unscaled playback requested";
     else if (gamma == "pq" || gamma == "hlg")
       why = "HDR video";
@@ -1534,7 +1543,15 @@ void PlayerComponent::updateSuperResolution()
   }
 
   if (want == m_superResolutionFilter)
+  {
+    if (want.isEmpty() && why != m_superResolutionReason)
+    {
+      m_superResolutionReason = why;
+      qInfo() << "Video Super Resolution off:" << why;
+    }
     return;
+  }
+  m_superResolutionReason = why;
 
   if (!m_superResolutionFilter.isEmpty())
   {
