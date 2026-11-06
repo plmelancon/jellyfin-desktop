@@ -618,7 +618,8 @@ QString SystemComponent::getNativeShellScript()
     ":/web-client/extension/jmpInputPlugin.js",
     ":/web-client/extension/jmpUpdatePlugin.js",
     ":/web-client/extension/connectivityHelper.js",
-    ":/web-client/extension/nativeshell.js"
+    ":/web-client/extension/nativeshell.js",
+    ":/web-client/extension/subSearchPlugin.js"
   };
 
   cachedScript = jmpInfoDeclaration;
