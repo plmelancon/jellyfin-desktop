@@ -13,6 +13,7 @@
 #include "ComponentManager.h"
 #include "settings/SettingsSection.h"
 
+#include <cmath>
 #include "MpvVideoItem.h"
 #include "AlbumArtProvider.h"
 #include "input/InputComponent.h"
@@ -194,6 +195,16 @@ void PlayerComponent::initializeMpv()
   mpv_observe_property(m_mpv->mpv(), 0, "audio-device-list", MPV_FORMAT_NODE);
   mpv_observe_property(m_mpv->mpv(), 0, "video-dec-params", MPV_FORMAT_NODE);
   mpv_observe_property(m_mpv->mpv(), 0, "demuxer-cache-state", MPV_FORMAT_NODE);
+
+#ifdef Q_OS_WIN
+  // Video Super Resolution (see updateSuperResolution()) depends on these.
+  mpv_observe_property(m_mpv->mpv(), 0, "hwdec-current", MPV_FORMAT_STRING);
+  mpv_observe_property(m_mpv->mpv(), 0, "osd-dimensions", MPV_FORMAT_NODE);
+  // Coalesce bursts (file start, window resize) into one filter change.
+  m_superResolutionTimer.setSingleShot(true);
+  m_superResolutionTimer.setInterval(500);
+  connect(&m_superResolutionTimer, &QTimer::timeout, this, &PlayerComponent::updateSuperResolution);
+#endif
 
   // Setup a hook with the ID 1, which is run during the file is loaded.
   // Used to delay playback start for display framerate switching.
@@ -609,6 +620,11 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
         // Aspect might be known now (or it changed during playback), so update settings
         // dependent on the aspect ratio.
         updateVideoAspectSettings();
+        m_superResolutionTimer.start();
+      }
+      else if (strcmp(prop->name, "hwdec-current") == 0 || strcmp(prop->name, "osd-dimensions") == 0)
+      {
+        m_superResolutionTimer.start();
       }
       break;
     }
@@ -1434,6 +1450,94 @@ void PlayerComponent::updateVideoConfiguration()
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+// NVIDIA RTX Video Super Resolution / Intel VSR (Windows, D3D11 renderer only).
+// Inserts mpv's d3d11vpp filter in the vendor's scaling mode, sized so that
+// the driver does the upscale to the output size; mpv then only scales the
+// last few pixels. Skipped for HDR (VSR is SDR only) and when the video is
+// already as large as the output.
+void PlayerComponent::updateSuperResolution()
+{
+  if (!m_mpv)
+    return;
+
+  static const char* LABEL = "@jfvsr";
+  QString want;
+  QString why;
+
+  QString mode = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "super_resolution").toString();
+  if (mode != "nvidia" && mode != "intel")
+  {
+    why = "disabled in settings";
+  }
+  else if (m_mpv->getProperty("hwdec-current").toString() != "d3d11va")
+  {
+    why = "video is not decoded with d3d11va";
+  }
+  else
+  {
+    QVariantMap dec = m_mpv->getProperty("video-dec-params").toMap();
+    QVariantMap osd = m_mpv->getProperty("osd-dimensions").toMap();
+    int w = dec.value("w").toInt();
+    int h = dec.value("h").toInt();
+    int tw = osd.value("w").toInt();
+    int th = osd.value("h").toInt();
+    QString gamma = dec.value("gamma").toString();
+
+    if (w <= 0 || h <= 0)
+      why = "no video";
+    else if (gamma == "pq" || gamma == "hlg")
+      why = "HDR video";
+    else if (tw <= 0 || th <= 0)
+      why = "output size unknown";
+    else
+    {
+      double scale = qMin(double(tw) / w, double(th) / h);
+      if (scale <= 1.05)
+      {
+        why = "video already at output size";
+      }
+      else
+      {
+        // Quarter steps, so small window resizes do not rebuild the filter.
+        scale = qMin(std::ceil(scale * 4.0) / 4.0, 4.0);
+        // VSR wants 8-bit input; 10-bit SDR is converted by the video processor.
+        QString fmt = dec.value("hw-pixelformat").toString() == "nv12" ? "" : "format=nv12:";
+        want = QString("%1:d3d11vpp=%2scale=%3:scaling-mode=%4")
+                 .arg(LABEL, fmt, QString::number(scale, 'f', 2), mode);
+      }
+    }
+  }
+
+  if (want == m_superResolutionFilter)
+    return;
+
+  if (!m_superResolutionFilter.isEmpty())
+  {
+    const char* rm[] = {"vf", "remove", LABEL, nullptr};
+    mpv_command(m_mpv->mpv(), rm);
+    m_superResolutionFilter.clear();
+  }
+
+  if (want.isEmpty())
+  {
+    qInfo() << "Video Super Resolution off:" << why;
+    return;
+  }
+
+  QByteArray filter = want.toUtf8();
+  const char* add[] = {"vf", "add", filter.constData(), nullptr};
+  int err = mpv_command(m_mpv->mpv(), add);
+  if (err < 0)
+  {
+    qWarning() << "Video Super Resolution: could not add" << want << "-" << mpv_error_string(err);
+    return;
+  }
+
+  m_superResolutionFilter = want;
+  qInfo() << "Video Super Resolution on:" << want;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 void PlayerComponent::setVideoConfiguration()
 {
   if (!m_mpv)
@@ -1456,6 +1560,14 @@ void PlayerComponent::setVideoConfiguration()
   {
     hwdecMode = "auto-copy";
   }
+#ifdef Q_OS_WIN
+  // Video Super Resolution runs in mpv's d3d11vpp filter, which only takes
+  // d3d11va frames that stay on the GPU: copy-back modes cannot feed it.
+  QString superResolution = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "super_resolution").toString();
+  if (hwdecMode != "no" && (superResolution == "nvidia" || superResolution == "intel"))
+    hwdecMode = "d3d11va";
+  m_superResolutionTimer.start();
+#endif
   m_mpv->setProperty( "hwdec", hwdecMode);
   m_mpv->setProperty( "hwdec-image-format", hwdecVTFormat);
 
