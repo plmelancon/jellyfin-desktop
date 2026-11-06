@@ -15,6 +15,12 @@ env:
   LIBEGL_SHA256: 34998ce757fc1ea58669462d87a1cd6ba27d2ea47a539f4ccfa21c4270f43003
   LIBGLESV2_SHA256: fe00a94de59674c525aebfc7b9498a96e061d75533ea4412cf78e4c00f5685cb
   D3DCOMPILER_SHA256: a05f99734f7c4822fefc12b367af21fd0976ed6608752fb1e1e80b6ece7ecbbb
+  # Qt 5.15 loads OpenSSL 1.1 at run time for QSslSocket (server connectivity
+  # check in find-webclient). Without it the app spins on "TLS initialization failed".
+  OPENSSL_URL: https://download.firedaemon.com/FireDaemon-OpenSSL/openssl-1.1.1w.zip
+  OPENSSL_ZIP_SHA256: 1870b15bf6749e65ffbbadf52cdff3ee0e9f02943550bf4395574bb432af3eb8
+  LIBSSL_SHA256: a2a8ca61ed7490251332e9792f797e76fbcd3afda51d8fed6cc8e7165faae295
+  LIBCRYPTO_SHA256: ba485625776661186e664cc1fb5b5b460a96406fe05ac2f17ead060eabdd7f84
 
 jobs:
   build-win64-vsr:
@@ -54,6 +60,11 @@ jobs:
         echo "$LIBEGL_SHA256  build/dependencies/libEGL.dll" | sha256sum -c -
         echo "$LIBGLESV2_SHA256  build/dependencies/libGLESv2.dll" | sha256sum -c -
         echo "$D3DCOMPILER_SHA256  build/dependencies/d3dcompiler_47.dll" | sha256sum -c -
+
+        curl -fL "$OPENSSL_URL" > openssl.zip
+        echo "$OPENSSL_ZIP_SHA256  openssl.zip" | sha256sum -c -
+        mkdir -p build/openssl
+        unzip -j openssl.zip openssl-1.1/x64/bin/libssl-1_1-x64.dll openssl-1.1/x64/bin/libcrypto-1_1-x64.dll -d build/openssl
     - name: Build
       shell: cmd
       run: |
@@ -69,6 +80,9 @@ jobs:
       run: |
         mkdir -p build/output/web-client/extension
         cp -r native/. build/output/web-client/extension/
+    - name: Add OpenSSL 1.1
+      shell: bash
+      run: cp build/openssl/libssl-1_1-x64.dll build/openssl/libcrypto-1_1-x64.dll build/output/
     - name: Check the bundle
       shell: bash
       run: |
@@ -79,6 +93,8 @@ jobs:
         echo "$LIBEGL_SHA256  libEGL.dll" | sha256sum -c -
         echo "$LIBGLESV2_SHA256  libGLESv2.dll" | sha256sum -c -
         echo "$D3DCOMPILER_SHA256  d3dcompiler_47.dll" | sha256sum -c -
+        echo "$LIBSSL_SHA256  libssl-1_1-x64.dll" | sha256sum -c -
+        echo "$LIBCRYPTO_SHA256  libcrypto-1_1-x64.dll" | sha256sum -c -
         grep -qa scaling-mode libmpv-2.dll
     - name: Archive the portable build
       uses: actions/upload-artifact@v4
