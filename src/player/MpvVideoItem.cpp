@@ -6,7 +6,7 @@
 MpvVideoItem::MpvVideoItem(QQuickItem *parent)
     : MpvItemBase(parent)
 {
-    connect(this, &MpvAbstractItem::ready, this, [this]() {
+    connect(this, &MpvItemBase::ready, this, [this]() {
         qDebug() << "MpvVideoItem ready() signal fired!";
         m_ready = true;
         initialize();

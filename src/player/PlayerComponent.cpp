@@ -526,6 +526,17 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
       m_playbackCanceled = false;
       m_playbackError = "";
 
+#ifdef Q_OS_WIN
+      // Drop the VSR filter between files; updateSuperResolution() adds it
+      // back once the next stream is known to qualify (it might be HDR).
+      if (!m_superResolutionFilter.isEmpty())
+      {
+        const char* rm[] = {"vf", "remove", "@jfvsr", nullptr};
+        mpv_command(m_mpv->mpv(), rm);
+        m_superResolutionFilter.clear();
+      }
+#endif
+
       switch (endFile->reason)
       {
         case MPV_END_FILE_REASON_ERROR:
@@ -620,12 +631,23 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
         // Aspect might be known now (or it changed during playback), so update settings
         // dependent on the aspect ratio.
         updateVideoAspectSettings();
-        m_superResolutionTimer.start();
+#ifdef Q_OS_WIN
+        // Immediately: a new stream (e.g. HDR) must not run through a filter
+        // set up for the previous one.
+        updateSuperResolution();
+#endif
       }
-      else if (strcmp(prop->name, "hwdec-current") == 0 || strcmp(prop->name, "osd-dimensions") == 0)
+#ifdef Q_OS_WIN
+      else if (strcmp(prop->name, "hwdec-current") == 0)
       {
+        updateSuperResolution();
+      }
+      else if (strcmp(prop->name, "osd-dimensions") == 0)
+      {
+        // Window resizes come in bursts; coalesce them.
         m_superResolutionTimer.start();
       }
+#endif
       break;
     }
     case MPV_EVENT_LOG_MESSAGE:
@@ -1477,14 +1499,17 @@ void PlayerComponent::updateSuperResolution()
   {
     QVariantMap dec = m_mpv->getProperty("video-dec-params").toMap();
     QVariantMap osd = m_mpv->getProperty("osd-dimensions").toMap();
-    int w = dec.value("w").toInt();
-    int h = dec.value("h").toInt();
+    // Display size (after pixel aspect); falls back to the coded size.
+    int w = dec.value("dw", dec.value("w")).toInt();
+    int h = dec.value("dh", dec.value("h")).toInt();
     int tw = osd.value("w").toInt();
     int th = osd.value("h").toInt();
     QString gamma = dec.value("gamma").toString();
 
     if (w <= 0 || h <= 0)
       why = "no video";
+    else if (m_mpv->getProperty("video-unscaled").toString() != "no")
+      why = "unscaled playback requested";
     else if (gamma == "pq" || gamma == "hlg")
       why = "HDR video";
     else if (tw <= 0 || th <= 0)
@@ -1566,7 +1591,8 @@ void PlayerComponent::setVideoConfiguration()
   QString superResolution = SettingsComponent::Get().value(SETTINGS_SECTION_VIDEO, "super_resolution").toString();
   if (hwdecMode != "no" && (superResolution == "nvidia" || superResolution == "intel"))
     hwdecMode = "d3d11va";
-  m_superResolutionTimer.start();
+  if (m_superResolutionTimer.isSingleShot())  // set up in initializeMpv()
+    m_superResolutionTimer.start();
 #endif
   m_mpv->setProperty( "hwdec", hwdecMode);
   m_mpv->setProperty( "hwdec-image-format", hwdecVTFormat);

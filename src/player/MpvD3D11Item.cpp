@@ -6,8 +6,11 @@
 #include <QMetaObject>
 #include <QThread>
 #include <QColor>
+#include <QQuickWindow>
 #include <rhi/qrhi.h>
 #include <rhi/qrhi_platform.h>
+
+#include <d3d11.h>
 
 #if __has_include(<mpv/render_d3d11.h>)
 #include <mpv/render_d3d11.h>
@@ -67,10 +70,20 @@ public:
 protected:
   void initialize(QRhiCommandBuffer*) override
   {
-    // Called again on every resize of the color buffer; only the first call
-    // (per scene graph) creates the render context.
+    // Called again on every color buffer resize. The mpv context is created
+    // lazily in render(), inside QRhi's external-content block, because mpv
+    // touches the shared immediate context while creating its resources.
+  }
+
+  void synchronize(QQuickRhiItem*) override
+  {
+  }
+
+  void render(QRhiCommandBuffer* cb) override
+  {
     QMutexLocker lock(&m_state->mutex);
-    if (m_state->ctx || !m_state->mpv)
+    QRhiTexture* tex = colorTexture();
+    if (!m_state->mpv || !tex)
       return;
 
     QRhi* r = rhi();
@@ -80,15 +93,43 @@ protected:
                   << r->backendName() << ") - no video output.";
       return;
     }
-
     auto* handles = static_cast<const QRhiD3D11NativeHandles*>(r->nativeHandles());
-    if (!handles || !handles->dev)
+    if (!handles || !handles->dev || !handles->context)
     {
       qCritical() << "MpvD3D11Item: no ID3D11Device from Qt - no video output.";
       return;
     }
 
-    mpv_d3d11_init_params init{handles->dev};
+    // mpv uses the device's immediate context directly and does not restore
+    // any state. ExternalContent + beginExternal() makes QRhi submit what it
+    // recorded so far; endExternal() makes it re-set all of its state.
+    cb->beginPass(renderTarget(), Qt::black, {1.0f, 0}, nullptr, QRhiCommandBuffer::ExternalContent);
+    cb->beginExternal();
+
+    // render_d3d11.h: stages mpv does not set must be at ClearState() defaults.
+    static_cast<ID3D11DeviceContext*>(handles->context)->ClearState();
+
+    if (!m_state->ctx)
+      createContext(handles->dev);
+
+    if (m_state->ctx)
+    {
+      mpv_d3d11_fbo fbo{reinterpret_cast<void*>(static_cast<quintptr>(tex->nativeTexture().object))};
+      mpv_render_param params[] = {
+        {MPV_RENDER_PARAM_D3D11_FBO, &fbo},
+        {MPV_RENDER_PARAM_INVALID, nullptr}};
+      mpv_render_context_render(m_state->ctx, params);
+    }
+
+    cb->endExternal();
+    cb->endPass();
+  }
+
+private:
+  // Called from render() with the mutex held, inside the external block.
+  void createContext(void* device)
+  {
+    mpv_d3d11_init_params init{device};
     mpv_render_param params[] = {
       {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_D3D11)},
       {MPV_RENDER_PARAM_D3D11_INIT_PARAMS, &init},
@@ -105,35 +146,6 @@ protected:
     qInfo() << "MpvD3D11Item: mpv renders through Direct3D 11";
 
     QMetaObject::invokeMethod(m_state->item, "ready", Qt::QueuedConnection);
-  }
-
-  void synchronize(QQuickRhiItem*) override
-  {
-  }
-
-  void render(QRhiCommandBuffer* cb) override
-  {
-    QMutexLocker lock(&m_state->mutex);
-    QRhiTexture* tex = colorTexture();
-    if (!m_state->ctx || !tex)
-      return;
-
-    // mpv uses the device's immediate context directly and does not restore
-    // any state. ExternalContent + beginExternal() makes QRhi submit what it
-    // recorded so far; endExternal() makes it re-set all of its state.
-    cb->beginPass(renderTarget(), Qt::black, {1.0f, 0}, nullptr, QRhiCommandBuffer::ExternalContent);
-    cb->beginExternal();
-
-    mpv_d3d11_fbo fbo{reinterpret_cast<void*>(static_cast<quintptr>(tex->nativeTexture().object))};
-    mpv_render_param params[] = {
-      {MPV_RENDER_PARAM_D3D11_FBO, &fbo},
-      {MPV_RENDER_PARAM_INVALID, nullptr}};
-    mpv_render_context_render(m_state->ctx, params);
-
-    cb->endExternal();
-    cb->endPass();
-
-    mpv_render_context_report_swap(m_state->ctx);
   }
 
 private:
@@ -194,5 +206,13 @@ MpvD3D11Item::~MpvD3D11Item()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 QQuickRhiItemRenderer* MpvD3D11Item::createRenderer()
 {
+  // Called during scene graph sync (GUI thread blocked). Tearing down the
+  // scene graph would free the mpv render context and lose the video output,
+  // so keep it across hide/minimize, like MpvQt does.
+  if (QQuickWindow* w = window())
+  {
+    w->setPersistentSceneGraph(true);
+    w->setPersistentGraphics(true);
+  }
   return new MpvD3D11Renderer(m_state);
 }
