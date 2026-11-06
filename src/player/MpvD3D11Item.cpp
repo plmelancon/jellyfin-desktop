@@ -148,7 +148,6 @@ private:
     QMetaObject::invokeMethod(m_state->item, "ready", Qt::QueuedConnection);
   }
 
-private:
   std::shared_ptr<MpvD3D11RenderState> m_state;
 };
 

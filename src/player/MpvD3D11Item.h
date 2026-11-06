@@ -1,19 +1,11 @@
 #ifndef MPVD3D11ITEM_H
 #define MPVD3D11ITEM_H
 
-// Windows-only replacement for MpvQt's MpvAbstractItem.
-//
-// MpvAbstractItem is a QQuickFramebufferObject, so it only works with the
-// OpenGL scene graph. That rules out d3d11va zero-copy decoding on Windows
-// (Qt 6 has no ANGLE), and with it mpv's d3d11vpp filter, which is what
-// drives NVIDIA RTX Video Super Resolution and Intel VSR.
-//
-// This item runs Qt Quick on Direct3D 11 and uses libmpv's D3D11 render API
-// (mpv 0.42 / client API 2.6): mpv decodes, filters and renders on Qt's own
-// ID3D11Device, straight into the item's color texture.
-//
-// The public surface (signals, mpvController()) mirrors MpvAbstractItem so
-// MpvVideoItem and PlayerComponent work unchanged.
+// Windows replacement for MpvQt's MpvAbstractItem, which is OpenGL-only.
+// mpv renders with the libmpv D3D11 render API (mpv 0.42) on the scene
+// graph's own ID3D11Device, so d3d11va frames stay on the GPU (zero-copy)
+// and D3D11 video filters such as d3d11vpp work.
+// Same signals and mpvController() as MpvAbstractItem.
 
 #include <QtQuick/QQuickRhiItem>
 #include <QMutex>
