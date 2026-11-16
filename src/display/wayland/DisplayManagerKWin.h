@@ -10,6 +10,11 @@ class QSocketNotifier;
 
 // Display backend for KDE Plasma on Wayland, using KWin's output management
 // protocols through a private Wayland connection.
+//
+// KWin keeps the last applied mode across restarts, so every switch away from
+// the original mode is recorded in a small file first; if the application
+// does not get to switch back (crash, kill, power loss), the next start
+// restores the original mode.
 class DisplayManagerKWin : public DisplayManager
 {
   Q_OBJECT
@@ -30,6 +35,7 @@ private Q_SLOTS:
 private:
   bool connectClient();
   const KWinOutputClient::Output* liveOutput(int display);
+  void restoreAfterCrash();
 
   KWinOutputClient m_client;
   QSocketNotifier* m_notifier;

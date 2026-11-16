@@ -1,10 +1,16 @@
 #include "DisplayManagerKWin.h"
 
 #include <QDebug>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 #include <QScreen>
 #include <QSocketNotifier>
 #include <QStringList>
 #include <QWindow>
+
+#include "Paths.h"
 
 typedef KWinOutputClient::Mode KWinMode;
 typedef KWinOutputClient::Output KWinOutput;
@@ -24,6 +30,75 @@ static QString modeName(const KWinMode& mode)
 {
   return QString("%1x%2@%3mHz%4").arg(mode.width).arg(mode.height).arg(mode.refreshMilliHz)
                                  .arg(mode.interlaced ? "i" : "");
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Restore record: written before switching an output away from its original
+// mode, removed once the original mode is back. Shared by all profiles, since
+// the display is.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+struct RestoreRecord
+{
+  QString output;
+  KWinMode from;
+  KWinMode to;
+};
+
+static QString restoreRecordPath()
+{
+  return Paths::globalDataDir("display-mode-restore.json");
+}
+
+static QJsonObject modeToJson(const KWinMode& mode)
+{
+  QJsonObject obj;
+  obj["width"] = mode.width;
+  obj["height"] = mode.height;
+  obj["refresh_mhz"] = mode.refreshMilliHz;
+  obj["interlaced"] = mode.interlaced;
+  return obj;
+}
+
+static KWinMode modeFromJson(const QJsonObject& obj)
+{
+  KWinMode mode;
+  mode.width = obj["width"].toInt();
+  mode.height = obj["height"].toInt();
+  mode.refreshMilliHz = obj["refresh_mhz"].toInt();
+  mode.interlaced = obj["interlaced"].toBool();
+  return mode;
+}
+
+static bool readRestoreRecord(RestoreRecord& record)
+{
+  QFile file(restoreRecordPath());
+  if (!file.open(QIODevice::ReadOnly))
+    return false;
+
+  QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+  record.output = obj["output"].toString();
+  record.from = modeFromJson(obj["from"].toObject());
+  record.to = modeFromJson(obj["to"].toObject());
+  return !record.output.isEmpty();
+}
+
+static bool writeRestoreRecord(const RestoreRecord& record)
+{
+  QJsonObject obj;
+  obj["output"] = record.output;
+  obj["from"] = modeToJson(record.from);
+  obj["to"] = modeToJson(record.to);
+
+  QSaveFile file(restoreRecordPath());
+  if (!file.open(QIODevice::WriteOnly))
+    return false;
+  file.write(QJsonDocument(obj).toJson());
+  return file.commit();
+}
+
+static void removeRestoreRecord()
+{
+  QFile::remove(restoreRecordPath());
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -71,6 +146,7 @@ bool DisplayManagerKWin::connectClient()
             << "current:" << (output.currentMode >= 0 ? modeName(output.modes[output.currentMode]) : "unknown");
   }
 
+  restoreAfterCrash();
   return true;
 }
 
@@ -84,6 +160,28 @@ void DisplayManagerKWin::onConnectionActivity()
     if (m_notifier)
       m_notifier->setEnabled(false);
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void DisplayManagerKWin::restoreAfterCrash()
+{
+  RestoreRecord record;
+  if (!readRestoreRecord(record))
+    return;
+
+  removeRestoreRecord();
+
+  const KWinOutput* output = m_client.findOutput(record.output.toStdString());
+  if (!output || output->currentMode < 0 || !sameMode(output->modes[output->currentMode], record.to))
+  {
+    qInfo() << "Discarding the display mode restore record for" << record.output
+            << "(the mode was changed since)";
+    return;
+  }
+
+  qInfo() << "The previous run left" << record.output << "at" << modeName(record.to)
+          << "- restoring" << modeName(record.from);
+  m_client.setMode(record.output.toStdString(), record.from, COMPOSITOR_TIMEOUT_MS);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -164,7 +262,32 @@ bool DisplayManagerKWin::setDisplayMode(int display, int mode)
 
   qInfo() << "Switching" << name << "to" << modeName(target);
 
-  KWinOutputClient::ApplyResult result = m_client.setMode(name.toStdString(), target, COMPOSITOR_TIMEOUT_MS);
+  // Write-ahead record, so that a crash cannot leave the display in our mode.
+  // Keep the original mode if we already switched away from it before.
+  RestoreRecord record;
+  bool haveRecord = readRestoreRecord(record) && record.output == name;
+  if (!haveRecord && output->currentMode >= 0 && !sameMode(target, output->modes[output->currentMode]))
+  {
+    record.output = name;
+    record.from = output->modes[output->currentMode];
+    haveRecord = true;
+  }
+  if (haveRecord && !sameMode(target, record.from))
+  {
+    record.to = target;
+    if (!writeRestoreRecord(record))
+      qWarning() << "Could not write" << restoreRecordPath();
+  }
+
+  std::string reason;
+  KWinOutputClient::ApplyResult result =
+    m_client.setMode(name.toStdString(), target, COMPOSITOR_TIMEOUT_MS, &reason);
+
+  // Back at the original mode: nothing left to restore.
+  output = m_client.findOutput(name.toStdString());
+  if (haveRecord && output && output->currentMode >= 0 && sameMode(output->modes[output->currentMode], record.from))
+    removeRestoreRecord();
+
   return result == KWinOutputClient::ApplyResult::Applied;
 }
 
