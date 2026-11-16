@@ -6,7 +6,6 @@ on:
   push:
     branches:
       - master
-      - rtx-vsr-qt6
 
 jobs:
   build:
