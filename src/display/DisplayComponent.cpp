@@ -244,9 +244,10 @@ int DisplayComponent::getApplicationDisplay(bool silent)
     if (!silent)
     {
       qInfo() << "Looking for a display at:" << activeWindow->geometry()
-                   << "(center:" << activeWindow->geometry().center() << ")";
+                   << "(center:" << activeWindow->geometry().center() << ")"
+                   << "screen:" << (activeWindow->screen() ? activeWindow->screen()->name() : QString());
     }
-    display = m_displayManager->getDisplayFromPoint(activeWindow->geometry().center());
+    display = m_displayManager->getDisplayFromWindow(activeWindow);
   }
 
   if (!silent)

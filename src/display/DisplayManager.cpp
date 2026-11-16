@@ -7,6 +7,7 @@
 //
 
 #include <QDebug>
+#include <QWindow>
 #include "DisplayManager.h"
 #include "math.h"
 #include "settings/SettingsComponent.h"
@@ -242,4 +243,13 @@ int DisplayManager::findBestMode(int display)
 int DisplayManager::getDisplayFromPoint(const QPoint& pt)
 {
   return getDisplayFromPoint(pt.x(), pt.y());
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+int DisplayManager::getDisplayFromWindow(QWindow* window)
+{
+  if (!window)
+    return -1;
+
+  return getDisplayFromPoint(window->geometry().center());
 }
