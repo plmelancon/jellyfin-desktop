@@ -67,6 +67,9 @@ private slots:
   void testNoSuitableModeReturnsNegative();
   void testFindBestMode();
   void testMultipleRefreshRate();
+  void testNearestRateBreaksWeightTie_data();
+  void testNearestRateBreaksWeightTie();
+  void testNearestRateTieBreakIgnoresModeOrder();
 };
 
 // Helper function: Populates a DisplayManager with some typical display modes.
@@ -223,6 +226,55 @@ void TestDisplayManager::testMultipleRefreshRate()
   DMMatchMediaInfo match(23.976f, false);
   int best = mgr.findBestMatch(0, match);
   QCOMPARE(best, 0);
+}
+
+void TestDisplayManager::testNearestRateBreaksWeightTie_data()
+{
+  // 24.00 and 23.976 get the same weight for 23.8095 fps; the nearest wins.
+  // Modes: 0 = 60.00 (current), 1 = 59.94, 2 = 24.00, 3 = 23.976.
+  // When no better mode exists the current mode (0) is returned, which
+  // DisplayComponent::switchToBestVideoMode treats as "no switch".
+  QTest::addColumn<float>("fps");
+  QTest::addColumn<int>("expected");
+
+  QTest::newRow("23.8095") << 23.8095f << 3;
+  QTest::newRow("23.976") << 23.976f << 3;
+  QTest::newRow("24") << 24.0f << 2;
+  QTest::newRow("25 (no switch)") << 25.0f << 0;
+  QTest::newRow("50 (no switch)") << 50.0f << 0;
+  QTest::newRow("29.97") << 29.97f << 1;
+  QTest::newRow("59.94") << 59.94f << 1;
+  QTest::newRow("60") << 60.0f << 0;
+}
+
+void TestDisplayManager::testNearestRateBreaksWeightTie()
+{
+  QFETCH(float, fps);
+  QFETCH(int, expected);
+
+  TestableDisplayManager mgr;
+  mgr.addMode(0, 1920, 1080, 32, 60.0f,   false);
+  mgr.addMode(1, 1920, 1080, 32, 59.94f,  false);
+  mgr.addMode(2, 1920, 1080, 32, 24.0f,   false);
+  mgr.addMode(3, 1920, 1080, 32, 23.976f, false);
+  mgr.setCurrentMode(0);
+
+  DMMatchMediaInfo match(fps, false);
+  QCOMPARE(mgr.findBestMatch(0, match), expected);
+}
+
+void TestDisplayManager::testNearestRateTieBreakIgnoresModeOrder()
+{
+  // Same as above with the 23.976 mode listed (lower id) before 24.00.
+  TestableDisplayManager mgr;
+  mgr.addMode(0, 1920, 1080, 32, 60.0f,   false);
+  mgr.addMode(1, 1920, 1080, 32, 59.94f,  false);
+  mgr.addMode(2, 1920, 1080, 32, 23.976f, false);
+  mgr.addMode(3, 1920, 1080, 32, 24.0f,   false);
+  mgr.setCurrentMode(0);
+
+  DMMatchMediaInfo match(23.8095f, false);
+  QCOMPARE(mgr.findBestMatch(0, match), 2);
 }
 
 QTEST_APPLESS_MAIN(TestDisplayManager)
