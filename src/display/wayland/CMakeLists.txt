@@ -34,3 +34,5 @@ target_link_libraries(kwinoutputclient PUBLIC PkgConfig::WAYLAND_CLIENT)
 add_executable(kwin-output-tool EXCLUDE_FROM_ALL KWinOutputTool.cpp)
 set_target_properties(kwin-output-tool PROPERTIES AUTOMOC OFF)
 target_link_libraries(kwin-output-tool kwinoutputclient)
+
+add_sources(DisplayManagerKWin.cpp DisplayManagerKWin.h)
