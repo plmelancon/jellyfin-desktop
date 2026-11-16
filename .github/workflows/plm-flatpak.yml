@@ -1,0 +1,58 @@
+# Fork only. Builds a single-file Flatpak bundle of the checked-out tree, using a
+# pinned copy of the Flathub manifest (dev/flatpak/).
+name: plm-flatpak
+
+on:
+  push:
+    branches:
+      - plm
+      - plm-ci
+  workflow_dispatch:
+
+concurrency:
+  group: plm-flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flatpak:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.11
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Stamp commit into the version string
+        # VERSION is read by CMake into "Starting Jellyfin version: ..." in the log.
+        # Only the CI checkout is modified; nothing is committed.
+        run: |
+          sha=$(git rev-parse --short=10 HEAD)
+          echo "SHORT_SHA=$sha" >> "$GITHUB_ENV"
+          echo "$(tr -d '\r\n' < VERSION)-plm.$sha" > VERSION
+          cat VERSION
+
+      - name: Check SDK has wayland-scanner and wayland-client
+        shell: bash
+        run: |
+          set -o pipefail
+          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y --noninteractive flathub org.kde.Sdk//6.11
+          flatpak run --command=sh org.kde.Sdk//6.11 -c '
+            set -e
+            command -v wayland-scanner
+            wayland-scanner --version
+            pkg-config --modversion wayland-client
+            ' 2>&1 | tee sdk-check.log
+          :
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.8
+        with:
+          bundle: jellyfin-desktop-plm-${{ env.SHORT_SHA }}.flatpak
+          manifest-path: dev/flatpak/org.jellyfin.JellyfinDesktop.yml
+          branch: stable
+          arch: x86_64
+          cache-key: plm-flatpak-x86_64-${{ hashFiles('dev/flatpak/org.jellyfin.JellyfinDesktop.yml') }}
+          restore-cache: true
+          upload-artifact: true

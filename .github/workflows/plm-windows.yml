@@ -1,0 +1,17 @@
+# Fork only. Windows build for the plm integration branch: upstream's reusable
+# workflow, with the update check switched OFF (a future upstream release must
+# not offer to replace this build).
+name: plm-windows
+
+on:
+  push:
+    branches:
+      - plm
+      - plm-ci
+  workflow_dispatch:
+
+jobs:
+  windows:
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      check_for_updates: 'OFF'
