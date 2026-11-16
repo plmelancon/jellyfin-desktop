@@ -179,7 +179,17 @@ int DisplayManager::findBestMatch(int display, DMMatchMediaInfo& matchInfo)
     qDebug() << "Mode " << weightit.value()->m_mode->m_id << "("
                  << weightit.value()->m_mode->getPrettyName() << ") has weight "
                  << weightit.value()->m_weight;
-    if (weightit.value()->m_weight > maxWeight)
+    // On equal weight prefer the mode whose rate is nearest to the video rate
+    // (e.g. 23.976 over 24.00 for 23.976 fps content). Iteration is in id
+    // order, so the lower id still wins a remaining tie.
+    bool better = weightit.value()->m_weight > maxWeight;
+    if (!better && chosen && weightit.value()->m_weight == maxWeight)
+    {
+      better = fabs(weightit.value()->m_mode->m_refreshRate - matchInfo.m_refreshRate) <
+               fabs(chosen->m_mode->m_refreshRate - matchInfo.m_refreshRate);
+    }
+
+    if (better)
     {
       chosen = weightit.value();
       maxWeight = chosen->m_weight;
