@@ -231,6 +231,10 @@ if(WIN32)
   target_link_libraries(jmp_core Qt6::GuiPrivate)
 endif()
 
+if(TARGET kwinoutputclient)
+  target_link_libraries(jmp_core kwinoutputclient)
+endif()
+
 # Delay-load libmpv on Windows for runtime AVX2 fallback
 if(WIN32)
   target_link_libraries(jmp_core delayimp.lib)

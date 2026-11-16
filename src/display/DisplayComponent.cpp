@@ -11,10 +11,15 @@
 #include "osx/DisplayManagerOSX.h"
 #elif defined(TARGET_RPI)
 #include "rpi/DisplayManagerRPI.h"
-#elif defined(USE_X11XRANDR)
-#include "x11/DisplayManagerX11.h"
 #elif defined(Q_OS_WIN)
 #include "win/DisplayManagerWin.h"
+#else
+#ifdef USE_X11XRANDR
+#include "x11/DisplayManagerX11.h"
+#endif
+#ifdef USE_KWIN_OUTPUT_MANAGEMENT
+#include "wayland/DisplayManagerKWin.h"
+#endif
 #endif
 
 #include "dummy/DisplayManagerDummy.h"
@@ -51,19 +56,46 @@ bool DisplayComponent::initializeDisplayManager()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 bool DisplayComponent::componentInitialize()
 {
+  bool initialized = false;
+
 #if 0
   m_displayManager = new DisplayManagerDummy(this);
 #elif defined(Q_OS_MAC)
   m_displayManager = new DisplayManagerOSX(this);
 #elif defined(TARGET_RPI)
   m_displayManager = new DisplayManagerRPI(this);
-#elif defined(USE_X11XRANDR)
-  m_displayManager = new DisplayManagerX11(this);
 #elif defined(Q_OS_WIN)
   m_displayManager = new DisplayManagerWin(this);
+#else
+  // Linux and other X11/Wayland systems: pick the backend at runtime.
+  QString platform = QGuiApplication::platformName();
+  Q_UNUSED(platform);
+#ifdef USE_KWIN_OUTPUT_MANAGEMENT
+  if (platform.startsWith("wayland"))
+  {
+    m_displayManager = new DisplayManagerKWin(this);
+    initialized = initializeDisplayManager();
+    if (!initialized)
+    {
+      qInfo() << "KDE output management is not available.";
+      delete m_displayManager;
+      m_displayManager = nullptr;
+    }
+  }
+#endif
+#ifdef USE_X11XRANDR
+  if (!m_displayManager && (platform == "xcb" || platform.startsWith("wayland")))
+    m_displayManager = new DisplayManagerX11(this);
+#endif
 #endif
 
-  if (initializeDisplayManager())
+  qInfo() << "Display backend:"
+          << (m_displayManager ? m_displayManager->metaObject()->className() : "none");
+
+  // Put the display back as we found it when quitting during playback.
+  connect(qApp, &QCoreApplication::aboutToQuit, this, &DisplayComponent::shutdownDisplayManager);
+
+  if (initialized || initializeDisplayManager())
   {
     auto* app = qobject_cast<QGuiApplication*>(QGuiApplication::instance());
 
@@ -234,6 +266,24 @@ bool DisplayComponent::restorePreviousVideoMode()
 
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
+void DisplayComponent::shutdownDisplayManager()
+{
+  if (!m_displayManager)
+    return;
+
+  // Synchronous, so that the mode is back before the process goes away. The
+  // KWin backend waits at most 2 seconds for the compositor.
+  if (m_displayManager->isValidDisplayMode(m_lastDisplay, m_lastVideoMode))
+  {
+    qInfo() << "Restoring the display mode before quitting.";
+    restorePreviousVideoMode();
+  }
+
+  delete m_displayManager;
+  m_displayManager = nullptr;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
 int DisplayComponent::getApplicationDisplay(bool silent)
 {
   QWindow* activeWindow = m_applicationWindow;
@@ -244,9 +294,10 @@ int DisplayComponent::getApplicationDisplay(bool silent)
     if (!silent)
     {
       qInfo() << "Looking for a display at:" << activeWindow->geometry()
-                   << "(center:" << activeWindow->geometry().center() << ")";
+                   << "(center:" << activeWindow->geometry().center() << ")"
+                   << "screen:" << (activeWindow->screen() ? activeWindow->screen()->name() : QString());
     }
-    display = m_displayManager->getDisplayFromPoint(activeWindow->geometry().center());
+    display = m_displayManager->getDisplayFromWindow(activeWindow);
   }
 
   if (!silent)
