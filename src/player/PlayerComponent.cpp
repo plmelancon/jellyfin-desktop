@@ -33,6 +33,9 @@
 #endif
 
 static constexpr qint64 POSITION_UPDATE_INTERVAL_MS = 100;
+// Delay before restoring the display mode when a file ends, so that autoplay of
+// the next file doesn't bounce the refresh rate (each change blanks the display).
+static constexpr int RESTORE_DISPLAY_DELAY_MS = 3000;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 static void wakeup_cb(void *context)
@@ -536,7 +539,7 @@ void PlayerComponent::handleMpvEvent(mpv_event *event)
       }
 
       if (!m_streamSwitchImminent)
-        m_restoreDisplayTimer.start(0);
+        m_restoreDisplayTimer.start(RESTORE_DISPLAY_DELAY_MS);
       m_streamSwitchImminent = false;
       break;
     }
