@@ -10,6 +10,23 @@ else()
   set(X11_Xrandr_LIB "")
 endif()
 
+# Display mode switching on KDE Plasma (Wayland), through KWin's output
+# management protocols. Independent of X11; needs wayland-client and
+# wayland-scanner.
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
+endif()
+find_program(WAYLAND_SCANNER_EXECUTABLE NAMES wayland-scanner)
+if(WAYLAND_CLIENT_FOUND AND WAYLAND_SCANNER_EXECUTABLE)
+  set(KWIN_OUTPUT_MANAGEMENT_FOUND 1)
+  add_definitions(-DUSE_KWIN_OUTPUT_MANAGEMENT)
+  message(STATUS "Enabling KDE Wayland display mode switching (KWin output management)")
+elseif(REQUIRE_KWIN_OUTPUT_MANAGEMENT)
+  message(FATAL_ERROR "REQUIRE_KWIN_OUTPUT_MANAGEMENT is set, but wayland-client or wayland-scanner was not found")
+else()
+  message(STATUS "Not building KDE Wayland display mode switching (wayland-client or wayland-scanner not found)")
+endif()
+
 if(LINUX_X11POWER)
   add_definitions(-DUSE_X11POWER)
   Message(STATUS "Enabling X11/XDG screensaver management")
