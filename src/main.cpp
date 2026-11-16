@@ -439,7 +439,15 @@ int main(int argc, char *argv[])
       chromiumFlags << "--ignore-certificate-errors";
 
     if (!chromiumFlags.isEmpty())
-      qputenv("QTWEBENGINE_CHROMIUM_FLAGS", chromiumFlags.join(" ").toUtf8());
+    {
+      // Keep whatever the user already put in QTWEBENGINE_CHROMIUM_FLAGS instead of
+      // replacing it, so flags set in the environment as a workaround for driver bugs
+      // (for example --disable-gpu, see #1091) survive when we add our own. The user's
+      // flags go last: Chromium lets the last occurrence of a switch win.
+      const QByteArray existing = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS").trimmed();
+      const QByteArray ours = chromiumFlags.join(" ").toUtf8();
+      qputenv("QTWEBENGINE_CHROMIUM_FLAGS", existing.isEmpty() ? ours : ours + " " + existing);
+    }
 
     if (parser.isSet("remote-debugging-port"))
       qputenv("QTWEBENGINE_REMOTE_DEBUGGING", parser.value("remote-debugging-port").toUtf8());
@@ -447,7 +455,7 @@ int main(int argc, char *argv[])
     QtWebEngineQuick::initialize();
     QApplication app(newArgc, newArgv);
 
-#if defined(Q_OS_WIN) 
+#if defined(Q_OS_WIN)
     // Setting window icon on OSX will break user ability to change it
     app.setWindowIcon(QIcon(":/images/icon.png"));
 #endif
@@ -541,13 +549,14 @@ int main(int argc, char *argv[])
           if (event->type() == QEvent::Show) {
             Qt::WindowFlags flags = win->flags();
 
-            // Only fix WebEngineView dropdowns (Tool + FramelessWindowHint + WindowStaysOnTopHint)
+            // Only fix legacy QT (< 6.11.1) WebEngineView dropdowns (Tool + FramelessWindowHint + WindowStaysOnTopHint)
             // Don't touch other windows (e.g., MPV-related)
-            bool isWebEnginePopup = (flags & Qt::Tool) &&
-                                     (flags & Qt::FramelessWindowHint) &&
-                                     (flags & Qt::WindowStaysOnTopHint);
+            const auto windowType = flags & Qt::WindowType_Mask;
+            bool isLegacyWebEnginePopup = windowType == Qt::Tool &&
+                                          (flags & Qt::FramelessWindowHint) &&
+                                          (flags & Qt::WindowStaysOnTopHint);
 
-            if (!isWebEnginePopup) {
+            if (!isLegacyWebEnginePopup) {
               return QObject::eventFilter(obj, event);
             }
 
