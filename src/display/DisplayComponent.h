@@ -60,6 +60,7 @@ public Q_SLOTS:
   void  monitorChange();
   bool  initializeDisplayManager();
   bool  restorePreviousVideoMode();
+  void  shutdownDisplayManager();
 
 Q_SIGNALS:
   void refreshRateChanged();

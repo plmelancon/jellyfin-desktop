@@ -92,6 +92,9 @@ bool DisplayComponent::componentInitialize()
   qInfo() << "Display backend:"
           << (m_displayManager ? m_displayManager->metaObject()->className() : "none");
 
+  // Put the display back as we found it when quitting during playback.
+  connect(qApp, &QCoreApplication::aboutToQuit, this, &DisplayComponent::shutdownDisplayManager);
+
   if (initialized || initializeDisplayManager())
   {
     auto* app = qobject_cast<QGuiApplication*>(QGuiApplication::instance());
@@ -261,6 +264,24 @@ bool DisplayComponent::restorePreviousVideoMode()
   return ret;
 }
 
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+void DisplayComponent::shutdownDisplayManager()
+{
+  if (!m_displayManager)
+    return;
+
+  // Synchronous, so that the mode is back before the process goes away. The
+  // KWin backend waits at most 2 seconds for the compositor.
+  if (m_displayManager->isValidDisplayMode(m_lastDisplay, m_lastVideoMode))
+  {
+    qInfo() << "Restoring the display mode before quitting.";
+    restorePreviousVideoMode();
+  }
+
+  delete m_displayManager;
+  m_displayManager = nullptr;
+}
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
 int DisplayComponent::getApplicationDisplay(bool silent)
