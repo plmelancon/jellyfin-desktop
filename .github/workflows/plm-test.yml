@@ -1,0 +1,35 @@
+# Fork only. Runs the unit tests (ctest) on the fork's branches; mirrors test.yml
+# without the coverage upload steps.
+name: plm-test
+
+on:
+  push:
+    branches:
+      - plm
+      - plm-ci
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Install build dependencies from debian/control
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes devscripts equivs ninja-build
+        sudo mk-build-deps -i -r -t "apt-get --yes" debian/control
+
+    - name: Configure
+      run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DUSE_STATIC_MPVQT=ON
+
+    - name: Build
+      run: cmake --build build
+
+    - name: Run tests
+      run: |
+        cd build
+        ctest --output-on-failure -V
