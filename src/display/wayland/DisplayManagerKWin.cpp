@@ -34,15 +34,19 @@ static QString modeName(const KWinMode& mode)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Restore record: written before switching an output away from its original
-// mode, removed once the original mode is back. Shared by all profiles, since
-// the display is.
+// mode, removed only once the original mode is confirmed back. Shared by all
+// profiles, since the display is.
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 struct RestoreRecord
 {
   QString output;
-  KWinMode from;
-  KWinMode to;
+  KWinMode from;      // the mode to go back to
+  KWinMode to;        // the mode last requested
+  KWinMode previous;  // the mode in use when it was requested
+  bool hasPrevious = false;
 };
+
+enum class RecordState { Missing, Valid, Unreadable };
 
 static QString restoreRecordPath()
 {
@@ -59,27 +63,35 @@ static QJsonObject modeToJson(const KWinMode& mode)
   return obj;
 }
 
-static KWinMode modeFromJson(const QJsonObject& obj)
+static bool modeFromJson(const QJsonValue& value, KWinMode& mode)
 {
-  KWinMode mode;
+  QJsonObject obj = value.toObject();
   mode.width = obj["width"].toInt();
   mode.height = obj["height"].toInt();
   mode.refreshMilliHz = obj["refresh_mhz"].toInt();
   mode.interlaced = obj["interlaced"].toBool();
-  return mode;
+  return mode.width > 0 && mode.height > 0 && mode.refreshMilliHz > 0;
 }
 
-static bool readRestoreRecord(RestoreRecord& record)
+static RecordState readRestoreRecord(RestoreRecord& record)
 {
   QFile file(restoreRecordPath());
+  if (!file.exists())
+    return RecordState::Missing;
   if (!file.open(QIODevice::ReadOnly))
-    return false;
+    return RecordState::Unreadable;
 
-  QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
+  QJsonParseError error;
+  QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &error);
+  if (error.error != QJsonParseError::NoError || !doc.isObject())
+    return RecordState::Unreadable;
+
+  QJsonObject obj = doc.object();
   record.output = obj["output"].toString();
-  record.from = modeFromJson(obj["from"].toObject());
-  record.to = modeFromJson(obj["to"].toObject());
-  return !record.output.isEmpty();
+  if (record.output.isEmpty() || !modeFromJson(obj["from"], record.from) || !modeFromJson(obj["to"], record.to))
+    return RecordState::Unreadable;
+  record.hasPrevious = obj.contains("previous") && modeFromJson(obj["previous"], record.previous);
+  return RecordState::Valid;
 }
 
 static bool writeRestoreRecord(const RestoreRecord& record)
@@ -88,6 +100,8 @@ static bool writeRestoreRecord(const RestoreRecord& record)
   obj["output"] = record.output;
   obj["from"] = modeToJson(record.from);
   obj["to"] = modeToJson(record.to);
+  if (record.hasPrevious)
+    obj["previous"] = modeToJson(record.previous);
 
   QSaveFile file(restoreRecordPath());
   if (!file.open(QIODevice::WriteOnly))
@@ -98,11 +112,14 @@ static bool writeRestoreRecord(const RestoreRecord& record)
 
 static void removeRestoreRecord()
 {
-  QFile::remove(restoreRecordPath());
+  QFile file(restoreRecordPath());
+  if (file.exists() && !file.remove())
+    qWarning() << "Could not remove" << restoreRecordPath() << ":" << file.errorString();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-DisplayManagerKWin::DisplayManagerKWin(QObject* parent) : DisplayManager(parent), m_notifier(nullptr)
+DisplayManagerKWin::DisplayManagerKWin(QObject* parent)
+  : DisplayManager(parent), m_notifier(nullptr), m_recoveryChecked(false)
 {
   m_client.setLogger([](KWinOutputClient::LogLevel level, const std::string& message)
   {
@@ -146,7 +163,12 @@ bool DisplayManagerKWin::connectClient()
             << "current:" << (output.currentMode >= 0 ? modeName(output.modes[output.currentMode]) : "unknown");
   }
 
-  restoreAfterCrash();
+  // Only at start-up: after a reconnection the record belongs to this run.
+  if (!m_recoveryChecked)
+  {
+    m_recoveryChecked = true;
+    restoreAfterCrash();
+  }
   return true;
 }
 
@@ -166,22 +188,48 @@ void DisplayManagerKWin::onConnectionActivity()
 void DisplayManagerKWin::restoreAfterCrash()
 {
   RestoreRecord record;
-  if (!readRestoreRecord(record))
+  RecordState state = readRestoreRecord(record);
+  if (state == RecordState::Missing)
     return;
 
-  removeRestoreRecord();
-
-  const KWinOutput* output = m_client.findOutput(record.output.toStdString());
-  if (!output || output->currentMode < 0 || !sameMode(output->modes[output->currentMode], record.to))
+  if (state == RecordState::Unreadable)
   {
-    qInfo() << "Discarding the display mode restore record for" << record.output
-            << "(the mode was changed since)";
+    qWarning() << "Cannot read" << restoreRecordPath()
+               << "- refresh rate switching stays off until it is fixed or removed";
     return;
   }
 
-  qInfo() << "The previous run left" << record.output << "at" << modeName(record.to)
+  const KWinOutput* output = m_client.findOutput(record.output.toStdString());
+  if (!output || output->currentMode < 0)
+  {
+    qInfo() << "Keeping the display mode restore record: output" << record.output << "is not available";
+    return;
+  }
+
+  const KWinMode current = output->modes[output->currentMode];
+  if (sameMode(current, record.from))
+  {
+    removeRestoreRecord();
+    return;
+  }
+
+  // The last requested mode, or the one before it if that request never applied.
+  bool ours = sameMode(current, record.to) || (record.hasPrevious && sameMode(current, record.previous));
+  if (!ours)
+  {
+    qInfo() << "Discarding the display mode restore record for" << record.output
+            << "(the mode was changed since)";
+    removeRestoreRecord();
+    return;
+  }
+
+  qInfo() << "The previous run left" << record.output << "at" << modeName(current)
           << "- restoring" << modeName(record.from);
-  m_client.setMode(record.output.toStdString(), record.from, COMPOSITOR_TIMEOUT_MS);
+  if (m_client.setMode(record.output.toStdString(), record.from, COMPOSITOR_TIMEOUT_MS) ==
+      KWinOutputClient::ApplyResult::Applied)
+    removeRestoreRecord();
+  else
+    qWarning() << "Could not restore" << record.output << "- keeping the record for the next start";
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -250,42 +298,62 @@ bool DisplayManagerKWin::setDisplayMode(int display, int mode)
   if (!isValidDisplayMode(display, mode))
     return false;
 
+  // Start from the compositor's latest state, not from what was cached.
+  m_client.dispatchPending();
+
   const KWinOutput* output = liveOutput(display);
-  if (!output)
+  if (!output || output->currentMode < 0)
   {
-    qWarning() << "KWin output management: display" << display << "is not available";
+    qWarning() << "KWin output management: the current mode of display" << display << "is unknown, not switching";
     return false;
   }
 
   const QString name = m_displays[display]->m_name;
   const KWinMode target = m_outputs[m_displays[display]->m_privId].modes[m_displays[display]->m_videoModes[mode]->m_privId];
+  const KWinMode current = output->modes[output->currentMode];
+  output = nullptr;
 
-  qInfo() << "Switching" << name << "to" << modeName(target);
+  qInfo() << "Switching" << name << "from" << modeName(current) << "to" << modeName(target);
 
   // Write-ahead record, so that a crash cannot leave the display in our mode.
-  // Keep the original mode if we already switched away from it before.
+  // It keeps the original mode across further switches, and also the mode in
+  // use now, which stays if this request does not apply.
   RestoreRecord record;
-  bool haveRecord = readRestoreRecord(record) && record.output == name;
-  if (!haveRecord && output->currentMode >= 0 && !sameMode(target, output->modes[output->currentMode]))
+  RecordState state = readRestoreRecord(record);
+  if (state == RecordState::Unreadable)
   {
+    qWarning() << "Cannot read" << restoreRecordPath() << "- not switching";
+    return false;
+  }
+
+  bool haveRecord = state == RecordState::Valid && record.output == name;
+  if (!haveRecord && !sameMode(target, current))
+  {
+    if (state == RecordState::Valid)
+      qWarning() << "Replacing the display mode restore record for" << record.output;
+    record = RestoreRecord();
     record.output = name;
-    record.from = output->modes[output->currentMode];
+    record.from = current;
     haveRecord = true;
   }
-  if (haveRecord && !sameMode(target, record.from))
+
+  bool restoring = haveRecord && sameMode(target, record.from);
+  if (haveRecord && !restoring)
   {
     record.to = target;
+    record.previous = current;
+    record.hasPrevious = !sameMode(current, record.from);
     if (!writeRestoreRecord(record))
-      qWarning() << "Could not write" << restoreRecordPath();
+    {
+      qWarning() << "Could not write" << restoreRecordPath() << "- not switching";
+      return false;
+    }
   }
 
-  std::string reason;
-  KWinOutputClient::ApplyResult result =
-    m_client.setMode(name.toStdString(), target, COMPOSITOR_TIMEOUT_MS, &reason);
+  KWinOutputClient::ApplyResult result = m_client.setMode(name.toStdString(), target, COMPOSITOR_TIMEOUT_MS);
 
-  // Back at the original mode: nothing left to restore.
-  output = m_client.findOutput(name.toStdString());
-  if (haveRecord && output && output->currentMode >= 0 && sameMode(output->modes[output->currentMode], record.from))
+  // Only a confirmed return to the original mode ends the need to restore.
+  if (restoring && result == KWinOutputClient::ApplyResult::Applied)
     removeRestoreRecord();
 
   return result == KWinOutputClient::ApplyResult::Applied;
@@ -335,10 +403,13 @@ int DisplayManagerKWin::getDisplayFromPoint(int x, int y)
     const KWinMode& mode = output->modes[output->currentMode];
     // Transforms 1, 3, 5 and 7 rotate by 90 or 270 degrees.
     bool rotated = output->transform % 2 == 1;
-    int width = static_cast<int>((rotated ? mode.height : mode.width) / output->scale);
-    int height = static_cast<int>((rotated ? mode.width : mode.height) / output->scale);
+    // In floating point: a tiny scale or a far position must not overflow.
+    double width = (rotated ? mode.height : mode.width) / output->scale;
+    double height = (rotated ? mode.width : mode.height) / output->scale;
+    double left = output->x;
+    double top = output->y;
 
-    if (x >= output->x && y >= output->y && x < output->x + width && y < output->y + height)
+    if (x >= left && y >= top && x < left + width && y < top + height)
       return display;
   }
   return -1;
