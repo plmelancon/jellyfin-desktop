@@ -272,8 +272,10 @@ void DisplayComponent::shutdownDisplayManager()
     return;
 
   // Synchronous, so that the mode is back before the process goes away. The
-  // KWin backend waits at most 2 seconds for the compositor.
-  if (m_displayManager->isValidDisplayMode(m_lastDisplay, m_lastVideoMode))
+  // KWin backend waits at most 2 seconds for the compositor. The validity of
+  // the saved mode is checked after restorePreviousVideoMode() has refreshed
+  // the display list.
+  if (m_lastDisplay >= 0 && m_lastVideoMode >= 0)
   {
     qInfo() << "Restoring the display mode before quitting.";
     restorePreviousVideoMode();
