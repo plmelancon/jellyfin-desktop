@@ -52,8 +52,14 @@ struct KWinOutputClient::Device
   std::vector<std::unique_ptr<DeviceMode>> modes;
   DeviceMode* current = nullptr;
   uint32_t nextModeSerial = 0;
+  uint32_t doneCount = 0;
   bool announced = false;
   bool removed = false;
+
+  // State as of the device's last done event, which makes changes atomic.
+  bool committed = false;
+  bool committedEnabled = false;
+  KWinOutputClient::Output snapshot;
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -159,6 +165,7 @@ static kde_output_device_v2_listener makeDeviceListener()
   {
     KWinOutputClient::Device* device = asDevice(data);
     device->announced = true;
+    device->doneCount++;
     device->client->onDeviceDone(device);
   };
   l.scale = [](void* data, kde_output_device_v2*, wl_fixed_t factor)
@@ -306,6 +313,65 @@ static const wl_callback_listener s_syncListener = {
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+// The output as the device's properties describe it now: modes sorted by
+// (width, height, refresh, interlaced), mode objects with the same values merged.
+static KWinOutputClient::Output makeOutput(const KWinOutputClient::Device* device)
+{
+  KWinOutputClient::Output output;
+  output.name = device->name;
+  output.uuid = device->uuid;
+  output.x = device->x;
+  output.y = device->y;
+  output.scale = device->scale;
+  output.transform = device->transform;
+  output.priority = device->priority;
+
+  for (const auto& modePtr : device->modes)
+  {
+    const KWinOutputClient::DeviceMode* mode = modePtr.get();
+    if (mode->removed || mode->width <= 0 || mode->height <= 0 || mode->refresh <= 0)
+      continue;
+
+    KWinOutputClient::Mode entry;
+    entry.width = mode->width;
+    entry.height = mode->height;
+    entry.refreshMilliHz = mode->refresh;
+    entry.interlaced = mode->interlaced;
+    entry.preferred = mode->preferred;
+
+    auto existing = std::find_if(output.modes.begin(), output.modes.end(),
+                                 [&entry](const KWinOutputClient::Mode& other)
+    {
+      return modeKey(other) == modeKey(entry);
+    });
+    if (existing != output.modes.end())
+      existing->preferred = existing->preferred || entry.preferred;
+    else
+      output.modes.push_back(entry);
+  }
+
+  std::sort(output.modes.begin(), output.modes.end(),
+            [](const KWinOutputClient::Mode& a, const KWinOutputClient::Mode& b)
+  {
+    return modeKey(a) < modeKey(b);
+  });
+
+  if (device->current && !device->current->removed)
+  {
+    for (size_t i = 0; i < output.modes.size(); i++)
+    {
+      if (modeKey(output.modes[i]) == modeKey(device->current))
+      {
+        output.currentMode = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+
+  return output;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
 // KWinOutputClient
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 KWinOutputClient::KWinOutputClient() = default;
@@ -361,8 +427,14 @@ void KWinOutputClient::onOutputAnnounced(Device* device)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-void KWinOutputClient::onDeviceDone(Device*)
+void KWinOutputClient::onDeviceDone(Device* device)
 {
+  if (!device->removed)
+  {
+    device->snapshot = makeOutput(device);
+    device->committedEnabled = device->enabled;
+    device->committed = true;
+  }
   rebuildOutputs();
 }
 
@@ -413,11 +485,17 @@ KWinOutputClient::WaitResult KWinOutputClient::dispatchUntil(const std::function
       continue;
     }
 
-    if (wl_display_flush(m_display) < 0 && errno != EAGAIN)
+    // Requests that do not fit in the socket yet go out once it is writable.
+    bool writePending = false;
+    if (wl_display_flush(m_display) < 0)
     {
-      wl_display_cancel_read(m_display);
-      checkConnection();
-      return WaitResult::Error;
+      if (errno != EAGAIN)
+      {
+        wl_display_cancel_read(m_display);
+        checkConnection();
+        return WaitResult::Error;
+      }
+      writePending = true;
     }
 
     auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -428,7 +506,7 @@ KWinOutputClient::WaitResult KWinOutputClient::dispatchUntil(const std::function
       return WaitResult::Timeout;
     }
 
-    pollfd pfd = {displayFd, POLLIN, 0};
+    pollfd pfd = {displayFd, static_cast<short>(POLLIN | (writePending ? POLLOUT : 0)), 0};
     int ret = poll(&pfd, 1, static_cast<int>(remaining));
     if (ret <= 0)
     {
@@ -442,6 +520,13 @@ KWinOutputClient::WaitResult KWinOutputClient::dispatchUntil(const std::function
       continue;
     }
 
+    if (!(pfd.revents & (POLLIN | POLLERR | POLLHUP)))
+    {
+      // Only writable: go round again to flush.
+      wl_display_cancel_read(m_display);
+      continue;
+    }
+
     if (wl_display_read_events(m_display) < 0 || wl_display_dispatch_pending(m_display) < 0)
     {
       checkConnection();
@@ -449,7 +534,8 @@ KWinOutputClient::WaitResult KWinOutputClient::dispatchUntil(const std::function
     }
   }
 
-  return WaitResult::Done;
+  // A handler may have hit a fatal error in the same batch of events.
+  return checkConnection() ? WaitResult::Done : WaitResult::Error;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -457,6 +543,8 @@ KWinOutputClient::WaitResult KWinOutputClient::roundtrip(int timeoutMs)
 {
   bool done = false;
   wl_callback* callback = wl_display_sync(m_display);
+  if (!callback)
+    return WaitResult::Error;
   wl_callback_add_listener(callback, &s_syncListener, &done);
 
   WaitResult result = dispatchUntil([&done]() { return done; }, timeoutMs);
@@ -478,6 +566,12 @@ bool KWinOutputClient::connect(int timeoutMs)
   }
 
   m_registry = wl_display_get_registry(m_display);
+  if (!m_registry)
+  {
+    log(LogLevel::Warning, "Could not get the Wayland registry");
+    disconnect();
+    return false;
+  }
   wl_registry_add_listener(m_registry, &s_registryListener, this);
 
   if (roundtrip(timeoutMs) != WaitResult::Done)
@@ -510,11 +604,16 @@ bool KWinOutputClient::connect(int timeoutMs)
   m_deviceRegistry = static_cast<kde_output_device_registry_v2*>(
     wl_registry_bind(m_registry, m_deviceRegistryName, &kde_output_device_registry_v2_interface,
                      m_registryVersion));
-  kde_output_device_registry_v2_add_listener(m_deviceRegistry, &s_deviceRegistryListener, this);
-
   m_management = static_cast<kde_output_management_v2*>(
     wl_registry_bind(m_registry, m_managementName, &kde_output_management_v2_interface,
                      m_managementVersion));
+  if (!m_deviceRegistry || !m_management)
+  {
+    log(LogLevel::Warning, "Could not bind KDE output management");
+    disconnect();
+    return false;
+  }
+  kde_output_device_registry_v2_add_listener(m_deviceRegistry, &s_deviceRegistryListener, this);
 
   // Binding the registry makes the compositor announce every output with all
   // its properties and modes, followed by done: one roundtrip is enough.
@@ -575,6 +674,7 @@ void KWinOutputClient::collectGarbage()
   if (m_applyDepth > 0)
     return;
 
+  bool released = false;
   for (auto it = m_devices.begin(); it != m_devices.end();)
   {
     Device* device = it->get();
@@ -582,6 +682,7 @@ void KWinOutputClient::collectGarbage()
     {
       releaseDevice(device);
       it = m_devices.erase(it);
+      released = true;
       continue;
     }
 
@@ -589,12 +690,45 @@ void KWinOutputClient::collectGarbage()
     for (auto& mode : modes)
     {
       if (mode->removed)
+      {
         releaseMode(mode.get());
+        released = true;
+      }
     }
     modes.erase(std::remove_if(modes.begin(), modes.end(),
                                [](const std::unique_ptr<DeviceMode>& mode) { return mode->removed; }),
                 modes.end());
     ++it;
+  }
+
+  if (released)
+    flushRequests();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void KWinOutputClient::flushRequests()
+{
+  if (!m_display || m_failed)
+    return;
+
+  // Send buffered requests now, waiting briefly if the socket is full.
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+  while (wl_display_flush(m_display) < 0)
+  {
+    if (errno != EAGAIN)
+    {
+      checkConnection();
+      return;
+    }
+
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0)
+      return;
+
+    pollfd pfd = {wl_display_get_fd(m_display), POLLOUT, 0};
+    if (poll(&pfd, 1, static_cast<int>(remaining)) < 0 && errno != EINTR)
+      return;
   }
 }
 
@@ -643,6 +777,16 @@ bool KWinOutputClient::dispatchPending()
   if (!m_display || m_failed || m_applyDepth > 0)
     return isConnected();
 
+  bool ok = readAvailable();
+  collectGarbage();
+  return ok && checkConnection();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+bool KWinOutputClient::readAvailable()
+{
+  // Read and dispatch what is available, without blocking and without
+  // releasing any proxy.
   while (wl_display_prepare_read(m_display) != 0)
   {
     if (wl_display_dispatch_pending(m_display) < 0)
@@ -669,71 +813,18 @@ bool KWinOutputClient::dispatchPending()
   if (wl_display_dispatch_pending(m_display) < 0)
     return checkConnection();
 
-  collectGarbage();
   return checkConnection();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 void KWinOutputClient::rebuildOutputs()
 {
+  // Only publish what each device committed with its own done event.
   m_outputs.clear();
-
-  for (const auto& devicePtr : m_devices)
+  for (const auto& device : m_devices)
   {
-    const Device* device = devicePtr.get();
-    if (device->removed || !device->announced || !device->enabled || device->name.empty())
-      continue;
-
-    Output output;
-    output.name = device->name;
-    output.uuid = device->uuid;
-    output.x = device->x;
-    output.y = device->y;
-    output.scale = device->scale;
-    output.transform = device->transform;
-    output.priority = device->priority;
-
-    for (const auto& modePtr : device->modes)
-    {
-      const DeviceMode* mode = modePtr.get();
-      if (mode->removed || mode->width <= 0 || mode->height <= 0 || mode->refresh <= 0)
-        continue;
-
-      Mode entry;
-      entry.width = mode->width;
-      entry.height = mode->height;
-      entry.refreshMilliHz = mode->refresh;
-      entry.interlaced = mode->interlaced;
-      entry.preferred = mode->preferred;
-
-      auto existing = std::find_if(output.modes.begin(), output.modes.end(), [&entry](const Mode& other)
-      {
-        return modeKey(other) == modeKey(entry);
-      });
-      if (existing != output.modes.end())
-        existing->preferred = existing->preferred || entry.preferred;
-      else
-        output.modes.push_back(entry);
-    }
-
-    std::sort(output.modes.begin(), output.modes.end(), [](const Mode& a, const Mode& b)
-    {
-      return modeKey(a) < modeKey(b);
-    });
-
-    if (device->current && !device->current->removed)
-    {
-      for (size_t i = 0; i < output.modes.size(); i++)
-      {
-        if (modeKey(output.modes[i]) == modeKey(device->current))
-        {
-          output.currentMode = static_cast<int>(i);
-          break;
-        }
-      }
-    }
-
-    m_outputs.push_back(output);
+    if (!device->removed && device->committed && device->committedEnabled && !device->snapshot.name.empty())
+      m_outputs.push_back(device->snapshot);
   }
 
   std::sort(m_outputs.begin(), m_outputs.end(), [](const Output& a, const Output& b)
@@ -775,7 +866,7 @@ KWinOutputClient::DeviceMode* KWinOutputClient::findDeviceMode(Device* device, c
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-KWinOutputClient::ApplyResult KWinOutputClient::setMode(const std::string& outputName, const Mode& mode,
+KWinOutputClient::ApplyResult KWinOutputClient::setMode(std::string outputName, Mode mode,
                                                         int timeoutMs, std::string* failureReason)
 {
   if (!dispatchPending())
@@ -816,31 +907,52 @@ KWinOutputClient::ApplyResult KWinOutputClient::setMode(const std::string& outpu
     return ApplyResult::Applied;
   }
 
-  log(LogLevel::Info, "Applying mode " + target);
+  kde_output_configuration_v2* configuration = kde_output_management_v2_create_configuration(m_management);
+  if (!configuration)
+  {
+    log(LogLevel::Warning, "Cannot set mode " + target + ": could not create a configuration");
+    return ApplyResult::Error;
+  }
 
+  log(LogLevel::Info, "Applying mode " + target);
   auto start = std::chrono::steady_clock::now();
 
   ApplyState state;
-  kde_output_configuration_v2* configuration = kde_output_management_v2_create_configuration(m_management);
   kde_output_configuration_v2_add_listener(configuration, &s_configurationListener, &state);
   kde_output_configuration_v2_mode(configuration, device->proxy, deviceMode->proxy);
   kde_output_configuration_v2_apply(configuration);
 
+  // No proxy is released and `device` stays valid until m_applyDepth drops.
   m_applyDepth++;
-  WaitResult wait = dispatchUntil([&state]() { return state.done; }, timeoutMs);
-  m_applyDepth--;
+
+  // KWin updates the device before it answers and completes the update with
+  // done; wait for that done too, within the same deadline, so that the mode
+  // is judged on a settled state.
+  uint32_t doneBefore = device->doneCount;
+  auto settled = [device, doneBefore]() { return device->removed || device->doneCount != doneBefore; };
+  WaitResult wait = dispatchUntil([&state, &settled]()
+  {
+    return state.done && (!state.applied || settled());
+  }, timeoutMs);
+
+  // Out of time: take a last look at what has arrived.
+  if (wait == WaitResult::Timeout)
+    readAvailable();
 
   kde_output_configuration_v2_destroy(configuration);
 
+  bool isCurrent = !device->removed && device->current && modeKey(device->current) == modeKey(mode);
+  bool isSettled = settled();
+  std::string current = (!device->removed && device->current)
+    ? describeMode(device->current->width, device->current->height, device->current->refresh)
+    : std::string("unknown");
+
+  m_applyDepth--;
+  device = nullptr;
+  deviceMode = nullptr;
+
   auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
     std::chrono::steady_clock::now() - start).count();
-
-  // The compositor updates current_mode before it answers, so the device state
-  // already tells whether the requested mode is in use.
-  auto isCurrent = [device, &mode]()
-  {
-    return !device->removed && device->current && modeKey(device->current) == modeKey(mode);
-  };
 
   ApplyResult result = ApplyResult::Error;
   if (wait == WaitResult::Error)
@@ -848,23 +960,22 @@ KWinOutputClient::ApplyResult KWinOutputClient::setMode(const std::string& outpu
     log(LogLevel::Warning, "Connection error while applying mode " + target);
     result = ApplyResult::Error;
   }
-  else if (wait == WaitResult::Done && state.applied)
+  else if (state.applied)
   {
-    if (isCurrent())
+    if (isCurrent)
     {
-      log(LogLevel::Info, "Mode " + target + " applied in " + std::to_string(elapsed) + " ms");
+      log(LogLevel::Info, "Mode " + target + " applied in " + std::to_string(elapsed) + " ms" +
+                          (isSettled ? "" : " (the output did not confirm in time)"));
       result = ApplyResult::Applied;
     }
     else
     {
-      std::string current = device->current ? describeMode(device->current->width, device->current->height,
-                                                           device->current->refresh) : "unknown";
       log(LogLevel::Warning, "Compositor applied the configuration but the current mode of " + outputName +
                              " is " + current);
       result = ApplyResult::Failed;
     }
   }
-  else if (wait == WaitResult::Done)
+  else if (state.done)
   {
     log(LogLevel::Warning, "Compositor refused mode " + target +
                            (state.reason.empty() ? std::string() : ": " + state.reason));
@@ -872,24 +983,22 @@ KWinOutputClient::ApplyResult KWinOutputClient::setMode(const std::string& outpu
       *failureReason = state.reason;
     result = ApplyResult::Failed;
   }
-  else
+  else if (isCurrent)
   {
     // Unknown outcome: decide from what the compositor reports now.
-    dispatchPending();
-    if (isCurrent())
-    {
-      log(LogLevel::Warning, "No answer in " + std::to_string(timeoutMs) + " ms, but mode " + target +
-                             " is now current");
-      result = ApplyResult::Applied;
-    }
-    else
-    {
-      log(LogLevel::Warning, "No answer in " + std::to_string(timeoutMs) + " ms while applying mode " + target);
-      result = ApplyResult::Timeout;
-    }
+    log(LogLevel::Warning, "No answer in " + std::to_string(timeoutMs) + " ms, but mode " + target +
+                           " is now current");
+    result = ApplyResult::Applied;
+  }
+  else
+  {
+    log(LogLevel::Warning, "No answer in " + std::to_string(timeoutMs) + " ms while applying mode " + target +
+                           ", current mode is " + current);
+    result = ApplyResult::Timeout;
   }
 
   collectGarbage();
+  flushRequests();
   rebuildOutputs();
   return result;
 }

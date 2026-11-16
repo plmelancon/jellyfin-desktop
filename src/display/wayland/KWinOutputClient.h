@@ -95,8 +95,9 @@ public:
   uint32_t managementVersion() const { return m_managementVersion; }
 
   // Switch the given output to the given mode and wait (bounded) for the
-  // compositor's answer. Only the mode of this one output is changed.
-  ApplyResult setMode(const std::string& outputName, const Mode& mode,
+  // compositor's answer. Only the mode of this one output is changed. The
+  // arguments are taken by value: dispatching rebuilds outputs().
+  ApplyResult setMode(std::string outputName, Mode mode,
                       int timeoutMs = 2000, std::string* failureReason = nullptr);
 
   // Internal, called from the Wayland listeners.
@@ -109,6 +110,8 @@ private:
   enum class WaitResult { Done, Timeout, Error };
   WaitResult dispatchUntil(const std::function<bool()>& condition, int timeoutMs);
   WaitResult roundtrip(int timeoutMs);
+  bool readAvailable();
+  void flushRequests();
   bool checkConnection();
   void collectGarbage();
   void rebuildOutputs();
