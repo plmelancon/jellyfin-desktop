@@ -39,6 +39,7 @@ private:
 
   KWinOutputClient m_client;
   QSocketNotifier* m_notifier;
+  bool m_recoveryChecked;
 
   // State behind m_displays: m_privId of a display/mode indexes these vectors.
   std::vector<KWinOutputClient::Output> m_outputs;
