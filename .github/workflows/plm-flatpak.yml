@@ -28,7 +28,7 @@ jobs:
         # VERSION is read by CMake into "Starting Jellyfin version: ..." in the log.
         # Only the CI checkout is modified; nothing is committed.
         run: |
-          sha=$(git rev-parse --short=10 HEAD)
+          sha=$(echo "$GITHUB_SHA" | cut -c1-10)
           echo "SHORT_SHA=$sha" >> "$GITHUB_ENV"
           echo "$(tr -d '\r\n' < VERSION)-plm.$sha" > VERSION
           cat VERSION
