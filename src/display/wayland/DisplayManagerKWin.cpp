@@ -403,10 +403,13 @@ int DisplayManagerKWin::getDisplayFromPoint(int x, int y)
     const KWinMode& mode = output->modes[output->currentMode];
     // Transforms 1, 3, 5 and 7 rotate by 90 or 270 degrees.
     bool rotated = output->transform % 2 == 1;
-    int width = static_cast<int>((rotated ? mode.height : mode.width) / output->scale);
-    int height = static_cast<int>((rotated ? mode.width : mode.height) / output->scale);
+    // In floating point: a tiny scale or a far position must not overflow.
+    double width = (rotated ? mode.height : mode.width) / output->scale;
+    double height = (rotated ? mode.width : mode.height) / output->scale;
+    double left = output->x;
+    double top = output->y;
 
-    if (x >= output->x && y >= output->y && x < output->x + width && y < output->y + height)
+    if (x >= left && y >= top && x < left + width && y < top + height)
       return display;
   }
   return -1;
